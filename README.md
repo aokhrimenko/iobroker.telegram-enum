@@ -1,0 +1,1 @@
+# iobroker.telegram-enum
