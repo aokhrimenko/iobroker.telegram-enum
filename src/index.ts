@@ -2,66 +2,121 @@ const StartCommand = "/material"
 
 const IconBulb = "💡"
 const IconHouse = "🏠"
+const IconReload = "🔄"
+const IconSettings = "⚙"
+const IconBattery = "🔋"
+const IconBatteryLow = "🪫"
 const IconBack = "⬅"
 const IconTemperature = "🌡"
 const IconHumidity = "💦"
 const IconSwitchOn = "💡"
 const IconSwitchOff = ""
-const IconButton = ""
+const IconButton = "⏺" // 🔘 🔳 🔲
 
 const TextFunctions = IconBulb + " Функції"
 const TextRooms = IconHouse + " Розташування"
 const TextBack = IconBack + " Повернутися"
+const TextReload = IconReload + " Оновити"
 const TextSelect = "Виберіть"
 const DefaultLocale = "uk"
 const FallbackLocale = "en"
-const ConfigStateId = "telegramMaterialConfig"
-const ConfigStateName = "Telegram Material Config"
+const ConfigStateId = "telegramControlConfig"
+const ConfigStateName = "Telegram Control Config"
 
-const EnumRooms = "rooms",
-    EnumFunctions = "functions"
+class Enums {
+    static short = ['r.', 'f.']
+    static full = ['enum.rooms.', 'enum.functions.']
 
-let EnumText = {}
-EnumText[EnumRooms] = TextRooms
-EnumText[EnumFunctions] = TextFunctions
+    static shortToFull(enumName: string): string {
+        for (const k in Enums.short) {
+            if (enumName.startsWith(Enums.short[k])) {
+                return enumName.replace(Enums.short[k], Enums.full[k])
+            }
+        }
+
+        return enumName
+    }
+
+    static fullToShort(enumName: string): string {
+        for (const k in Enums.full) {
+            if (enumName.startsWith(Enums.full[k])) {
+                return enumName.replace(Enums.full[k], Enums.short[k])
+            }
+        }
+
+        return enumName
+    }
+}
+
+class Telegram {
+    config: Config
+    action: Action
+    bot: Bot
+
+    constructor(instanceId: string) {
+        this.config = new Config(instanceId)
+    }
+
+    onRequest(e) {
+        const user = e.state.val.substring(1,e.state.val.indexOf("]"))
+        const action = e.state.val.substring(e.state.val.indexOf("]")+1,e.state.val.length)
+
+        console.log(`REQUEST: user=${user}, action=${action}`)
+
+        this.config.load(user)
+        console.log(`onRequest => loaded config: ${JSON.stringify(this.config)}`)
+        this.action = Action.parse(action)
+        this.bot = new Bot(this.config, this.action)
+        this.bot.handle()
+    }
+
+    run() {
+        this.config.init()
+        on({id: `${this.config.instanceId}.communicate.request`, change: 'any'}, (e) => {this.onRequest(e)});
+    }
+}
 
 class Config {
     user: string = ""
     chatId: string = ""
-    messageId: string = ""
+    messageId: number = 0
+    instanceId: string
+    language: string = "en"
 
-    update() {
-        const currentBotSendMessageId = getState("telegram.0.communicate.botSendMessageId").val
-        if (currentBotSendMessageId === this.messageId) {
+    constructor(instanceId: string) {
+        this.instanceId = instanceId
+    }
+
+    updateMessageId(messageId: number) {
+        if (messageId === this.messageId) {
             return
         }
-
-        const config = JSON.parse(getState(ConfigStateId).val)
-        config[this.chatId] = {messageId: currentBotSendMessageId}
-        setState(ConfigStateId, JSON.stringify(config))
+        this.messageId = messageId
+        this.update()
     }
 
-    reset() {
-        const config = JSON.parse(getState(ConfigStateId).val)
-        delete config[this.chatId]
-        this.messageId = ""
-        setState(ConfigStateId, JSON.stringify(config))
+    updateProperty(key, value: string) {
+        this[key] = value
+        this.update()
     }
 
-    static load(user: string): Config {
-        const config = new Config()
-        config.user = user
-        config.chatId = getState("telegram.0.communicate.requestUserId").val
+    update() {
+        const config = JSON.parse(getState(ConfigStateId).val)
+        config[this.chatId] = this
+        setState(ConfigStateId, JSON.stringify(config), true)
+    }
+
+    load(user: string) {
+        this.user = user
+        this.chatId = getState(`${this.instanceId}.communicate.requestUserId`).val
 
         const savedConfig = JSON.parse(getState(ConfigStateId).val)
-        if (undefined !== savedConfig[config.chatId]) {
-            config.messageId = savedConfig[config.chatId].messageId
+        if (undefined !== savedConfig[this.chatId]) {
+            Object.assign(this, savedConfig[this.chatId])
         }
-
-        return config
     }
 
-    static init() {
+    init() {
         createState(ConfigStateId, "{}", false, {"name": ConfigStateName, "role": "json", "type": "string"})
     }
 }
@@ -69,89 +124,96 @@ class Config {
 class Action {
     static delimiter: string = "#"
     static switch:string = "switch"
+    static commandList = "l"
+    static commandExecute = "e"
+    static commandConfigure = "c"
     enumName: string
-    stateId: string
-    payload: string
+    command: string
+    key: string
+    value: string
 
-    constructor(enumName: string, stateId: string = "", payload: string = "") {
+    constructor(enumName: string, command: string = Action.commandList, key: string = "", value: string = "") {
         this.enumName = enumName
-        this.stateId = stateId
-        this.payload = payload
+        this.command = command
+        this.key = key
+        this.value = value
     }
 
     isExecutable(): boolean {
-        return "" !== this.stateId
+        return this.command === Action.commandExecute && this.key !== ""
     }
 
-    isStartAction(): boolean {
+    isConfigurable(): boolean {
+        return this.command === Action.commandConfigure && this.key !== "" && this.value !== ""
+    }
+
+    isStartCommandAction(): boolean {
         return StartCommand === this.enumName
     }
 
-    asNoop(): Action {
-        return new Action(this.enumName)
+    isEnumListAction(): boolean {
+        return "" !== this.enumName && Action.commandList === this.command
     }
 
     toString(): string {
-        return `${this.enumName}${Action.delimiter}${this.stateId}${Action.delimiter}${this.payload}`
+        return `${Enums.fullToShort(this.enumName)}${Action.delimiter}${this.command}${Action.delimiter}${this.key}${Action.delimiter}${this.value}`
     }
 
     back(): Action {
-        if (this.stateId) {
-            return new Action(this.enumName)
-        }
-
         return new Action(StartCommand)
     }
 
+    reload(): Action {
+        return new Action(this.enumName, Action.commandList)
+    }
+
     execute() {
-        const obj = getObject(this.stateId)
+        const obj = getObject(this.key)
         switch (obj.common?.role) {
             case "switch":
-                setState(this.stateId, !getState(this.stateId).val)
+                setState(this.key, !getState(this.key).val)
                 break;
-            
+
+            case "button":
+                setState(this.key, true)
+                break;
+
             default:
         }
     }
 
     static parse(action: string): Action {
-        const [enumName, stateId, payload] = action.split(Action.delimiter)
-        return new Action(enumName, stateId, payload)
+        const [enumName, command, stateId, payload] = action.split(Action.delimiter)
+        return new Action(Enums.shortToFull(enumName), command, stateId, payload)
+    }
+
+    static forEnum(enumName: string): string {
+        const action = new Action(enumName, Action.commandList)
+        return action.toString()
     }
 }
-
-
-console.log(JSON.stringify(getObject('zigbee.0.00124b0008e65579.state')))
-console.log(JSON.stringify(getObject('zigbee.0.00124b0008e65579.state', 'rooms')))
-console.log(JSON.stringify(getObject('zigbee.0.00124b0008e65579.state', 'functions')))
-
-// rooms.forEach((room) => console.log(JSON.stringify(room)))
 
 class CallbackButton {
     text: string
     callback_data: string
 
-    static isSupported(state: any): boolean {
-        if (state.common?.role === "switch") {
-            return true
-        }
-        return false
-    }
-
-    static create(action: Action, obj: any): CallbackButton|null {
+    static createForObject(enumName: string, obj: any): CallbackButton|null {
         const button = new CallbackButton()
         switch (obj.common?.role) {
             case "switch":
                 const value = getState(obj._id).val
                 const icon = value ? IconSwitchOn : IconSwitchOff
                 button.text = `${icon} ${obj.common.name}`
-                button.callback_data = `${action.enumName}${Action.delimiter}${obj._id}${Action.delimiter}${value ? "0" : "1"}`
+                button.callback_data = (new Action(enumName, Action.commandExecute, obj._id, value ? "0" : "1")).toString()
                 break;
-            
+
+            case "button":
+                button.text = `${IconButton} ${obj.common.name}`
+                button.callback_data = (new Action(enumName, Action.commandExecute, obj._id)).toString()
+                break;
+
             default:
                 return null
-                // button.text = `${obj.common.name}`
-                // button.callback_data = action.asNoop().toString()
 
         }
         return button
@@ -160,7 +222,45 @@ class CallbackButton {
 type CallbackButtonsRow = Array<CallbackButton>
 type InlineKeyboard = Array<CallbackButtonsRow>
 
+class MessageText {
+    static objToKv(obj: any): KeyValue|null {
+        console.log(`objToKv: ${JSON.stringify(obj)}`)
+        if (obj.common?.role === "switch" || obj.common?.role === "button") {
+            return null;
+        }
+        return new KeyValue(obj.common.name, `${getState(obj._id).val}${obj.common.unit}`);
+    }
+
+    static formatKv(kv: KeyValue[]): string {
+        let result = ''
+        const grouped = []
+
+        for (const {key, value} of kv) {
+            if (!grouped[key]) {
+                grouped[key] = []
+            }
+            grouped[key].push(value)
+        }
+
+        for (const k in grouped) {
+            result += `${k}: ${grouped[k].join(", ")}\n`
+        }
+
+        return result
+    }
+}
+
+class KeyValue {
+    key: string
+    value: string
+    constructor(key, value: string) {
+        this.key = key
+        this.value = value
+    }
+}
+
 class Message {
+    header: string = ""
     text: string = ""
     buttons: InlineKeyboard = []
     maxButtonsInRow: number = 2
@@ -168,7 +268,12 @@ class Message {
     addButtonsRow(row: CallbackButtonsRow): Message {
         this.buttons.push(row)
         return this
-    } 
+    }
+
+    addTextRow(row: string): Message {
+        this.text += `${row}\n`
+        return this
+    }
 
     addEmptyButtonsRow(): Message {
         this.buttons.push([])
@@ -193,94 +298,124 @@ class Bot {
     }
 
     send(message: Message) {
-        if ("" !== this.config.messageId) {
-            // edit previous message
-            console.log("Bot::send EDIT")
-            sendTo('telegram.0', {
-                user: this.config.user,
-                text: message.text,
-                editMessageText: {
-                    options: {
-                        chat_id: this.config.chatId,
-                        message_id: this.config.messageId,
-                        reply_markup: {
-                            inline_keyboard: message.buttons,
-                        }
-                    }
-                }
-            })
-        } else {
-            // send new message
-            console.log(`Bot::send NEW to user "${this.config.user}"`)
-            sendTo('telegram.0', {
-                user: this.config.user,
-                text: message.text,
-                reply_markup: {
-                    inline_keyboard: message.buttons,
-                }
-            })
+        if ('' === message.header && '' === message.header) {
+            return
         }
+
+        let text = ""
+        if ('' !== message.header) {
+            text = `*${message.header}*\n\n`
+        }
+        text += message.text
+
+        // send new message
+        console.log(`Bot::send user="${this.config.user}", messageText=${JSON.stringify(text)}, buttons=${JSON.stringify(message.buttons)}`)
+        sendTo(this.config.instanceId, {
+            user: this.config.user,
+            text: text,
+            parse_mode: 'Markdown',
+            reply_markup: {
+                inline_keyboard: message.buttons,
+            }
+        })
+
+        const botSendMessageIdSubscription = on({id: `${this.config.instanceId}.communicate.botSendMessageId`, change: "any"}, (e) => {
+            unsubscribe(botSendMessageIdSubscription)
+            this.config.updateMessageId(e.state.val)
+        })
     }
 
     handle() {
         console.log(`User "${this.config.user}" sends action "${this.action.toString()}"`)
         const message = new Message()
 
-        switch(true) {
-            case this.action.isStartAction():
-                this.config.reset()
-                message.text = TextSelect
-                for (const [name, text] of Object.entries(EnumText)) {
-                    message.addButton({text: text.toString(),  callback_data: name.toString()})
+        // delete previously sent message
+        if (0 !== this.config.messageId) {
+            sendTo(this.config.instanceId, {
+                user: this.config.user,
+                deleteMessage: {
+                    options: {
+                        chat_id: this.config.chatId,
+                        message_id: this.config.messageId,
+                    }
                 }
+            });
+        }
+
+        // execute action
+       if (this.action.isExecutable()) {
+           this.action.execute();
+       } else if (this.action.isConfigurable()) {
+           this.config.updateProperty(this.action.key, this.action.value)
+       }
+
+        // prepare enums / states
+        // render message
+
+        // send message
+
+        switch(true) {
+            case this.action.isStartCommandAction():
+                message.header = 'Головне меню'
+
+                for (const {id, members, name} of getEnums()) {
+                    if (id.split('.').length >= 3 && members.length === 0) {
+                        continue;
+                    }
+                    if (members.length === 0) {
+                        message.addEmptyButtonsRow()
+                        message.addButton({text: `--- ${name[this.config.language]} ---`, callback_data: StartCommand})
+                        message.addEmptyButtonsRow()
+                    } else {
+                        message.addButton({text: name[this.config.language], callback_data: Action.forEnum(id)})
+                    }
+                }
+
                 break;
 
-            case this.action.isExecutable():
-                this.action.execute()
-            
-            default:
-                for (const {id, members, name} of getEnums(this.action.enumName)) {
-                    const enumName = name[DefaultLocale] || name[FallbackLocale] || name
-                    console.log(`ENUM: id: ${id}, enumName: ${enumName}, name: ${JSON.stringify(name)}`)
-                    message.text = enumName
+            case this.action.isEnumListAction() || this.action.isExecutable():
+                const allEnums = getEnums()
+                const requestedEnum = allEnums.filter((e) => e.id === this.action.enumName)[0]
+                const textKeyValues = []
 
-                    for (const memberId of members) {
-                        const obj = getObject(memberId, enumName)
-                        const parentId = memberId.substring(0, memberId.lastIndexOf("."))
-                        const parentObj = getObject(parentId)
-                        console.log("OBJ: " + JSON.stringify({obj: obj, parent: parentObj}))
-                        const button = CallbackButton.create(this.action, obj)
+                message.addButtonsRow([{text: TextReload, callback_data: this.action.reload().toString()}])
+                message.addEmptyButtonsRow()
+
+                if (!!requestedEnum && !!requestedEnum.members) {
+                    message.header = requestedEnum.name[this.config.language]
+
+                    for (const memberId of requestedEnum.members) {
+                        const obj = getObject(memberId)
+
+                        const textKeyValue = MessageText.objToKv(obj)
+                        if (null !== textKeyValue) {
+                            textKeyValues.push(textKeyValue)
+                        }
+
+                        // const parentId = memberId.substring(0, memberId.lastIndexOf("."))
+                        // const parentObj = getObject(parentId)
+                        // console.log("OBJ: " + JSON.stringify({obj: obj, parent: parentObj}))
+                        const button = CallbackButton.createForObject(this.action.enumName, obj)
                         if (null !== button) {
                             message.addButton(button)
                         }
                     }
                 }
 
-                message.addButtonsRow([{text: TextBack, callback_data: this.action.back().toString()}])
-        }
+                console.log(`textKeyValues: ${JSON.stringify(textKeyValues)}`)
+                message.text = MessageText.formatKv(textKeyValues)
 
-        if ("" === message.text) {
-            return
+                message.addButtonsRow([{text: TextBack, callback_data: this.action.back().toString()}])
+                break;
+
+            default:
+                break;
         }
 
         this.send(message)
-
-        const botSendMessageIdSubscription = on({id: "telegram.0.communicate.botSendMessageId", change: "any"}, () => {
-            unsubscribe(botSendMessageIdSubscription)
-            this.config.update()
-        })
     }
 }
 
-Config.init()
 
-on({id: 'telegram.0.communicate.request', change: 'any'}, function (e) {
-    const user = e.state.val.substring(1,e.state.val.indexOf("]"))
-    const actionText = e.state.val.substring(e.state.val.indexOf("]")+1,e.state.val.length)
-
-    const config = Config.load(user)
-    const action = Action.parse(actionText)
-    const bot = new Bot(config, action)
-    bot.handle()
-})
-
+const telegram = new Telegram('telegram.0')
+telegram.run()
